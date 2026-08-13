@@ -34,8 +34,8 @@ SignedUninstallerDir={#SignedUninstallerDir}
 #endif
 
 [Tasks]
-Name: "path"; Description: "Add msedit to the system &PATH"
-Name: "path\edit"; Description: "Also provide it as &edit, taking precedence over the edit.exe shipped with Windows"
+Name: "path"; Description: "Add msedit to the system &PATH"; Flags: checkablealone
+Name: "path\edit"; Description: "Also provide it as &edit, taking precedence over the edit.exe shipped with Windows"; Flags: dontinheritcheck
 
 [Files]
 Source: {#Source}; DestDir: "{app}"; DestName: "msedit.exe"; Flags: notimestamp ignoreversion
