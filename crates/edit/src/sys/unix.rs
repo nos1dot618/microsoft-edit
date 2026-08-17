@@ -150,7 +150,7 @@ pub fn get_window_size() -> io::Result<Size> {
     let ret = unsafe { libc::ioctl(STATE.stdout, libc::TIOCGWINSZ, &raw mut winsz) };
     if ret != 0 {
         Err(last_os_error())
-    } else if winsz.ws_row <= 0 || winsz.ws_col <= 0 {
+    } else if winsz.ws_row == 0 || winsz.ws_col == 0 {
         Err(io::Error::other("invalid terminal size"))
     } else {
         Ok(Size { width: winsz.ws_col as CoordType, height: winsz.ws_row as CoordType })
