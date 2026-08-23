@@ -7,6 +7,7 @@ use std::path::Path;
 use std::{mem, vec};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use edit::document::WriteableDocument as _;
 use edit::helpers::*;
 use edit::{buffer, hash, json, lsh, oklab, simd, unicode};
 use stdext::arena::{self, scratch_arena};
@@ -92,8 +93,8 @@ fn bench_buffer(c: &mut Criterion) {
         assert_eq!(actual, data.end_content);
     }
 
-    let bench_gap_buffer = || {
-        let mut buf = buffer::GapBuffer::new(false).unwrap();
+    let bench_piece_tree = || {
+        let mut buf = buffer::PieceTree::new(false, ()).unwrap();
         buf.replace(0..usize::MAX, data.start_content.as_bytes());
 
         for t in &data.txns {
@@ -127,7 +128,7 @@ fn bench_buffer(c: &mut Criterion) {
 
     // Sanity check: If this fails, the implementation is incorrect.
     {
-        let buf = bench_gap_buffer();
+        let buf = bench_piece_tree();
         let mut actual = Vec::new();
         buf.extract_raw(0..usize::MAX, &mut actual, 0);
         assert_eq!(actual, data.end_content.as_bytes());
@@ -140,8 +141,8 @@ fn bench_buffer(c: &mut Criterion) {
     }
 
     c.benchmark_group("buffer")
-        .bench_function(BenchmarkId::new("GapBuffer", "rustcode"), |b| {
-            b.iter(bench_gap_buffer);
+        .bench_function(BenchmarkId::new("PieceTree", "rustcode"), |b| {
+            b.iter(bench_piece_tree);
         })
         .bench_function(BenchmarkId::new("TextBuffer", "rustcode"), |b| {
             b.iter(bench_text_buffer);
