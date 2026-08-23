@@ -205,6 +205,7 @@ pub struct TextBuffer {
     active_edit_depth: i32,
     active_edit_off: usize,
     active_edit_deleted: usize,
+    active_edit_coalescing: bool,
 
     stats: TextBufferStatistics,
     cursor: Cursor,
@@ -261,6 +262,7 @@ impl TextBuffer {
             active_edit_depth: 0,
             active_edit_off: 0,
             active_edit_deleted: 0,
+            active_edit_coalescing: false,
 
             stats,
             cursor: Default::default(),
@@ -2769,6 +2771,9 @@ impl TextBuffer {
 
         self.active_edit_off = cursor.offset;
         self.active_edit_deleted = 0;
+        self.active_edit_coalescing =
+            matches!(history_type, HistoryType::Write | HistoryType::Delete)
+                || self.active_edit_group.is_some();
         self.highlighter_cache.invalidate_from(cursor.logical_pos.y);
 
         // If word-wrap is enabled, the visual layout of all logical lines affected by the write
@@ -2795,7 +2800,12 @@ impl TextBuffer {
         let logical_y_before = self.cursor.logical_pos.y;
 
         // Write!
-        self.buffer.replace(self.active_edit_off..self.active_edit_off, text);
+        if self.active_edit_coalescing {
+            self.buffer.replace_coalescing(self.active_edit_off..self.active_edit_off, text);
+        } else {
+            self.buffer.replace(self.active_edit_off..self.active_edit_off, text);
+        }
+        self.active_edit_coalescing = true;
 
         // Move self.cursor to the end of the newly written text. Can't use `self.set_cursor_internal`,
         // because we're still in the progress of recalculating the line stats.
@@ -2812,7 +2822,12 @@ impl TextBuffer {
         let logical_y_before = self.cursor.logical_pos.y;
         let off = self.active_edit_off;
         let count = to.offset - off;
-        self.buffer.replace(off..to.offset, b"");
+        if self.active_edit_coalescing {
+            self.buffer.replace_coalescing(off..to.offset, b"");
+        } else {
+            self.buffer.replace(off..to.offset, b"");
+        }
+        self.active_edit_coalescing = true;
         self.active_edit_deleted += count;
 
         self.stats.logical_lines += logical_y_before - to.logical_pos.y;
@@ -2941,7 +2956,13 @@ fn detect_bom(bytes: &[u8]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor as IoCursor;
+
+    use stdext::arena::scratch_arena;
+
     use super::{CursorMovement, SearchOptions, TextBuffer};
+    use crate::helpers::CoordType;
+    use crate::json;
 
     fn buffer_contents(buf: &mut TextBuffer) -> String {
         let mut str = String::new();
@@ -3006,12 +3027,136 @@ mod tests {
     fn consecutive_writes_are_one_revision() {
         let mut buf = TextBuffer::new(true).unwrap();
         buf.write_canon(b"a");
+        let allocations = buf.buffer.diagnostics().node_allocations;
         buf.write_canon(b"b");
         buf.write_canon(b"c");
 
+        assert_eq!(buf.buffer.diagnostics().node_allocations, allocations);
         buf.undo();
         assert_eq!(buffer_contents(&mut buf), "");
         buf.redo();
         assert_eq!(buffer_contents(&mut buf), "abc");
+    }
+
+    #[test]
+    fn consecutive_backspaces_reuse_pending_nodes() {
+        let mut buf = TextBuffer::new(true).unwrap();
+        buf.write_raw(b"abcd");
+        buf.delete(CursorMovement::Grapheme, -1);
+        let allocations = buf.buffer.diagnostics().node_allocations;
+        buf.delete(CursorMovement::Grapheme, -1);
+        buf.delete(CursorMovement::Grapheme, -1);
+
+        assert_eq!(buf.buffer.diagnostics().node_allocations, allocations);
+        assert_eq!(buffer_contents(&mut buf), "a");
+        buf.undo();
+        assert_eq!(buffer_contents(&mut buf), "abcd");
+    }
+
+    #[test]
+    fn investigate_rustcode_trace_coalescing() {
+        let compressed = include_bytes!("../../../../assets/editing-traces/rustcode.json.zst");
+        let decoded = zstd::decode_all(IoCursor::new(compressed)).unwrap();
+        let decoded = str::from_utf8(&decoded).unwrap();
+        let scratch = scratch_arena(None);
+        let data = json::parse(&scratch, decoded).unwrap();
+        let root = data.as_object().unwrap();
+        let transactions = root.get_array("txns").unwrap();
+
+        let mut buffer = TextBuffer::new(false).unwrap();
+        buffer.set_crlf(false);
+        buffer.write_raw(root.get_str("startContent").unwrap().as_bytes());
+
+        let mut patches = 0;
+        let mut cursor_jumps = 0;
+        let mut deletions = 0;
+        let mut insertions = 0;
+        let mut replacements = 0;
+
+        for transaction in transactions {
+            let transaction = transaction.as_object().unwrap();
+            for patch in transaction.get_array("patches").unwrap() {
+                let patch = patch.as_array().unwrap();
+                let offset = patch[0].as_number().unwrap() as usize;
+                let delete = patch[1].as_number().unwrap() as CoordType;
+                let insert = patch[2].as_str().unwrap().as_bytes();
+
+                patches += 1;
+                if offset != buffer.cursor_offset() {
+                    cursor_jumps += 1;
+                    buffer.cursor_move_to_offset(offset);
+                }
+                if delete > 0 && !insert.is_empty() {
+                    deletions += 1;
+                    insertions += 1;
+                    buffer.selection_update_delta(CursorMovement::Grapheme, delete);
+                    buffer.write_raw(insert);
+                } else if delete > 0 {
+                    deletions += 1;
+                    buffer.delete(CursorMovement::Grapheme, delete);
+                } else if !insert.is_empty() {
+                    insertions += 1;
+                    buffer.write_raw(insert);
+                }
+                if delete > 0 && !insert.is_empty() {
+                    replacements += 1;
+                }
+            }
+        }
+
+        let diagnostics = buffer.buffer.diagnostics();
+        eprintln!(
+            "rustcode: transactions={}, patches={patches}, cursor_jumps={cursor_jumps}, \
+             deletions={deletions}, insertions={insertions}, replacements={replacements}, \
+             diagnostics={diagnostics:?}",
+            transactions.len(),
+        );
+
+        assert_eq!(buffer_contents(&mut buffer), root.get_str("endContent").unwrap());
+        assert!(diagnostics.reachable_revisions <= patches * 2 + 2);
+
+        let mut grouped = TextBuffer::new(false).unwrap();
+        grouped.set_crlf(false);
+        grouped.write_raw(root.get_str("startContent").unwrap().as_bytes());
+        let mut nonempty_transactions = 0;
+        let mut transactions_without_revision = Vec::new();
+        for (transaction_index, transaction) in transactions.iter().enumerate() {
+            let generation_before = grouped.generation();
+            let revisions_before = grouped.buffer.revision_allocation_count();
+            grouped.edit_begin_grouping();
+            let transaction = transaction.as_object().unwrap();
+            for patch in transaction.get_array("patches").unwrap() {
+                let patch = patch.as_array().unwrap();
+                let offset = patch[0].as_number().unwrap() as usize;
+                let delete = patch[1].as_number().unwrap() as CoordType;
+                let insert = patch[2].as_str().unwrap().as_bytes();
+
+                if offset != grouped.cursor_offset() {
+                    grouped.cursor_move_to_offset(offset);
+                }
+                if delete > 0 {
+                    grouped.delete(CursorMovement::Grapheme, delete);
+                }
+                if !insert.is_empty() {
+                    grouped.write_raw(insert);
+                }
+            }
+            grouped.edit_end_grouping();
+            let changed = grouped.generation() != generation_before;
+            nonempty_transactions += usize::from(changed);
+            if changed && grouped.buffer.revision_allocation_count() == revisions_before {
+                transactions_without_revision.push(transaction_index);
+            }
+        }
+
+        let grouped_diagnostics = grouped.buffer.diagnostics();
+        eprintln!(
+            "rustcode grouped by transaction: nonempty_transactions={nonempty_transactions}, \
+               transactions_without_revision={transactions_without_revision:?}, \
+               diagnostics={grouped_diagnostics:?}"
+        );
+        assert_eq!(buffer_contents(&mut grouped), root.get_str("endContent").unwrap());
+        assert!(transactions_without_revision.is_empty());
+        assert_eq!(grouped_diagnostics.reachable_revisions, nonempty_transactions + 1);
     }
 }

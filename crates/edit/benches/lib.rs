@@ -115,10 +115,12 @@ fn bench_buffer(c: &mut Criterion) {
             if let Some(pos) = p.0 {
                 tb.cursor_move_to_logical(pos);
             }
-            if p.1 > 0 {
+            if p.1 > 0 && !p.2.is_empty() {
+                tb.selection_update_delta(buffer::CursorMovement::Grapheme, p.1);
+                tb.write_raw(p.2.as_bytes());
+            } else if p.1 > 0 {
                 tb.delete(buffer::CursorMovement::Grapheme, p.1);
-            }
-            if !p.2.is_empty() {
+            } else if !p.2.is_empty() {
                 tb.write_raw(p.2.as_bytes());
             }
         }
