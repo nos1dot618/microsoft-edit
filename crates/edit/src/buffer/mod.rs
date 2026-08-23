@@ -470,6 +470,11 @@ impl TextBuffer {
         self.overtype = overtype;
     }
 
+    /// Gets the byte offset of the cursor.
+    pub fn cursor_offset(&self) -> usize {
+        self.cursor.offset
+    }
+
     /// Gets the logical cursor position, that is,
     /// the position in lines and graphemes per line.
     pub fn cursor_logical_pos(&self) -> Point {

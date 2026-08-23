@@ -73,12 +73,16 @@ fn bench_buffer(c: &mut Criterion) {
 
         for t in &data.txns {
             for p in &t.patches {
-                tb.cursor_move_to_offset(p.0);
-                let beg = tb.cursor_logical_pos();
+                let beg = if p.0 != tb.cursor_offset() {
+                    tb.cursor_move_to_offset(p.0);
+                    Some(tb.cursor_logical_pos())
+                } else {
+                    None
+                };
 
                 tb.delete(buffer::CursorMovement::Grapheme, p.1 as CoordType);
-
                 tb.write_raw(p.2.as_bytes());
+
                 patches_with_coords.push((beg, p.1 as CoordType, p.2));
             }
         }
@@ -107,9 +111,15 @@ fn bench_buffer(c: &mut Criterion) {
         tb.write_raw(data.start_content.as_bytes());
 
         for p in &patches_with_coords {
-            tb.cursor_move_to_logical(p.0);
-            tb.delete(buffer::CursorMovement::Grapheme, p.1);
-            tb.write_raw(p.2.as_bytes());
+            if let Some(pos) = p.0 {
+                tb.cursor_move_to_logical(pos);
+            }
+            if p.1 > 0 {
+                tb.delete(buffer::CursorMovement::Grapheme, p.1);
+            }
+            if !p.2.is_empty() {
+                tb.write_raw(p.2.as_bytes());
+            }
         }
 
         tb
