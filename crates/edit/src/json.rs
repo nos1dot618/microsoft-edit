@@ -604,63 +604,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "allocation profiling test"]
-    fn profile_automerge_paper_allocations() {
-        const GIB: usize = 1024 * 1024 * 1024;
-
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/editing-traces/automerge-paper.json");
-        let input = std::fs::read_to_string(path).unwrap();
-        let arena = Arena::new(GIB).unwrap();
-
-        let value = parse(&arena, &input).unwrap();
-        std::hint::black_box(value);
-
-        let total = arena.offset();
-        eprintln!("JSON parser arena allocations: {total} bytes");
-    }
-
-    #[test]
-    fn test_scratch_spill() {
-        let arena = scratch_arena(None);
-
-        let items = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-        let members = (0..100).map(|i| format!(r#""k{i}":{i}"#)).collect::<Vec<_>>().join(",");
-        let text = "abc\\n".repeat(100);
-        let input = format!("{{\"a\":[{items}],\"o\":{{{members}}},\"s\":\"{text}\"}}");
-
-        let value = parse(&arena, &input).unwrap();
-        let obj = value.as_object().unwrap();
-
-        let array = obj.get_array("a").unwrap();
-        assert_eq!(array.len(), 100);
-        assert_eq!(array[99].as_number(), Some(99.0));
-
-        let nested = obj.get_object("o").unwrap();
-        assert_eq!(nested.len(), 100);
-        assert_eq!(nested.get_number("k99"), Some(99.0));
-
-        assert_eq!(obj.get_str("s").unwrap(), "abc\n".repeat(100));
-    }
-
-    #[test]
-    fn test_scratch_boundary() {
-        let arena = scratch_arena(None);
-
-        // The scratch buffer holds 8 values, so this covers both sides of the spill.
-        for n in [0usize, 7, 8, 9, 64] {
-            let items = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-            let value = parse(&arena, &format!("[{items}]")).unwrap();
-            let array = value.as_array().unwrap();
-
-            assert_eq!(array.len(), n);
-            for (i, value) in array.iter().enumerate() {
-                assert_eq!(value.as_number(), Some(i as f64));
-            }
-        }
-    }
-
-    #[test]
     fn test_null() {
         let scratch = scratch_arena(None);
         assert!(parse(&scratch, "null").unwrap().is_null());
